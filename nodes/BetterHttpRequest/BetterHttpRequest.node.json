@@ -1,0 +1,11 @@
+{
+  "node": "n8n-nodes-better-http-request.betterHttpRequest",
+  "nodeVersion": "1.0",
+  "codexVersion": "1.0",
+  "categories": ["Core Nodes"],
+  "resources": {
+    "primaryDocumentation": [],
+    "credentialDocumentation": []
+  },
+  "alias": ["http", "request", "api", "retry", "better"]
+}
