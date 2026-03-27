@@ -35,7 +35,7 @@ jobs:
       - name: Install & build
         if: steps.version.outputs.changed == 'true'
         run: |
-          npm ci
+          npm ci --ignore-scripts
           npm run build
 
       - name: Run tests
