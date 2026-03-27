@@ -14,6 +14,10 @@
   "files": [
     "dist"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AntonyDalmiere/n8n-nodes-better-http-request"
+  },
   "n8n": {
     "n8nNodesApiVersion": 1,
     "nodes": [
