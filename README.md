@@ -56,7 +56,7 @@ When the workflow runs, any item whose request returns one of the configured sta
 | **Retry Delay (ms)** | `1000` | Milliseconds to wait between retry attempts. For HTTP 429, the `Retry-After` header value takes precedence. |
 | **Retry On Status Codes** | `429,500,502,503,504` | Comma-separated list of HTTP status codes that trigger a retry. |
 | **Batching** | – | Split items into batches and add a delay between them to avoid rate limits. |
-| **Timeout** | `300000` (5 min) | Time in ms to wait for the server to start responding before aborting. |
+| **Timeout** | `10000` (10 s) | Time in ms to wait for the server to start responding before aborting. |
 | **Send Credentials on Cross-Origin Redirect** | `false` | Forward auth headers when following cross-origin redirects. |
 
 ## Development
