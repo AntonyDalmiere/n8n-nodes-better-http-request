@@ -34,7 +34,7 @@ After installation the node appears in the node palette as **Better HTTP Request
 
 ### Basic request
 
-1. Add a **Better HTTP Request** node to your workflow.
+1. Add the **Better HTTP Request** node to your workflow.
 2. Set the **Method** (GET, POST, …) and the **URL**.
 3. Optionally configure **Query Parameters**, **Headers**, and a **Body** in the respective sections.
 4. Execute the workflow.
