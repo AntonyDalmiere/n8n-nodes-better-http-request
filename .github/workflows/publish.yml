@@ -1,0 +1,57 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Check version change
+        id: version
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          LOCAL_VER=$(node -p "require('./package.json').version")
+          NPM_VER=$(npm view "$PKG_NAME" version 2>/dev/null || echo "0.0.0")
+          echo "local=$LOCAL_VER" >> "$GITHUB_OUTPUT"
+          echo "npm=$NPM_VER" >> "$GITHUB_OUTPUT"
+          if [ "$LOCAL_VER" != "$NPM_VER" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install & build
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run tests
+        if: steps.version.outputs.changed == 'true'
+        run: npm test
+
+      - name: Publish
+        if: steps.version.outputs.changed == 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        if: steps.version.outputs.changed == 'true'
+        run: echo "### Published v${{ steps.version.outputs.local }} to npm 🚀" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip
+        if: steps.version.outputs.changed != 'true'
+        run: echo "### No version change (v${{ steps.version.outputs.local }} == npm). Skipped." >> "$GITHUB_STEP_SUMMARY"
