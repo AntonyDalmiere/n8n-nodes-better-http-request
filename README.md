@@ -76,4 +76,4 @@ The project is written in TypeScript. The compiled output is placed in `dist/`.
 
 ## License
 
-[MIT](LICENSE)
+MIT
