@@ -20,7 +20,7 @@ An enhanced **HTTP Request** community node for [n8n](https://n8n.io) that adds 
 2. Click **Install a community node**.
 3. Enter `n8n-nodes-better-http-request` and confirm the installation.
 
-### Manual / self-hosted
+### Manual install on self-hosted
 
 ```bash
 npm install n8n-nodes-better-http-request
