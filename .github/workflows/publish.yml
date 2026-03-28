@@ -8,7 +8,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +38,10 @@ jobs:
           npm ci --ignore-scripts
           npm run build
 
+      - name: Create tarball
+        if: steps.version.outputs.changed == 'true'
+        run: tar -czf n8n-nodes-better-http-request-${{ steps.version.outputs.local }}.tar.gz dist/
+
       - name: Run tests
         if: steps.version.outputs.changed == 'true'
         run: npm test
@@ -48,9 +52,20 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Create GitHub Release
+        if: steps.version.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.local }}
+          name: ${{ steps.version.outputs.local }}
+          body: Published v${{ steps.version.outputs.local }} to npm
+          files: n8n-nodes-better-http-request-${{ steps.version.outputs.local }}.tar.gz
+          draft: false
+          prerelease: false
+
       - name: Summary
         if: steps.version.outputs.changed == 'true'
-        run: echo "### Published v${{ steps.version.outputs.local }} to npm 🚀" >> "$GITHUB_STEP_SUMMARY"
+        run: echo "### Published v${{ steps.version.outputs.local }} to npm and created GitHub release 🚀" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Skip
         if: steps.version.outputs.changed != 'true'
