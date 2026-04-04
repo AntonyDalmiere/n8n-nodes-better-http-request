@@ -218,6 +218,30 @@ describe('BetterHttpRequest Node', () => {
 		expect(result[0][2].json).toEqual({ item: 3 });
 	});
 
+	// 3b. High-volume items success
+	test('processes 5000 items successfully', async () => {
+		let callCount = 0;
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(5000),
+			requestFn: async () => {
+				const index = callCount;
+				callCount++;
+				return {
+					body: { item: index },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(5000);
+		expect(callCount).toBe(5000);
+		expect(result[0][0].json).toEqual({ item: 0 });
+		expect(result[0][4999].json).toEqual({ item: 4999 });
+	}, 30000);
+
 	// 4. Continue on fail
 	test('continue on fail returns error items', async () => {
 		let callCount = 0;
@@ -634,5 +658,298 @@ describe('BetterHttpRequest Node', () => {
 		expect(result[0][0].json).toHaveProperty('error');
 		// Only 1 call - no retries
 		expect(callCount).toBe(1);
+	});
+
+	// Connection Errors - ECONNREFUSED
+	test('connection error ECONNREFUSED is retried on fail', async () => {
+		let callCount = 0;
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(1),
+			continueOnFail: true,
+			params: {
+				'options': {
+					retryOnFail: true,
+					maxRetries: 3,
+					retryDelay: 0,
+					retryOnStatusCodes: '429,500,502,503,504',
+				},
+				'options.retryOnFail': true,
+				'options.maxRetries': 3,
+				'options.retryDelay': 0,
+				'options.retryOnStatusCodes': '429,500,502,503,504',
+			},
+			requestFn: async () => {
+				callCount++;
+				if (callCount === 1) {
+					const err: any = new Error('Connection refused');
+					err.code = 'ECONNREFUSED';
+					throw err;
+				}
+				return {
+					body: { success: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(1);
+		// Should succeed after retry
+		expect(result[0][0].json).toHaveProperty('success', true);
+		expect(result[0][0].json).not.toHaveProperty('error');
+		// Should have been called twice (once failed, once succeeded)
+		expect(callCount).toBe(2);
+	});
+
+	// Connection Errors - ECONNRESET
+	test('connection error ECONNRESET is retried on fail', async () => {
+		let callCount = 0;
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(1),
+			continueOnFail: true,
+			params: {
+				'options': {
+					retryOnFail: true,
+					maxRetries: 3,
+					retryDelay: 0,
+					retryOnStatusCodes: '429,500,502,503,504',
+				},
+				'options.retryOnFail': true,
+				'options.maxRetries': 3,
+				'options.retryDelay': 0,
+				'options.retryOnStatusCodes': '429,500,502,503,504',
+			},
+			requestFn: async () => {
+				callCount++;
+				if (callCount === 1) {
+					const err: any = new Error('Connection reset');
+					err.code = 'ECONNRESET';
+					throw err;
+				}
+				return {
+					body: { fixed: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(1);
+		expect(result[0][0].json).toHaveProperty('fixed', true);
+		expect(callCount).toBe(2);
+	});
+
+	// Connection Errors - ETIMEDOUT
+	test('connection error ETIMEDOUT is retried on fail', async () => {
+		let callCount = 0;
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(1),
+			continueOnFail: true,
+			params: {
+				'options': {
+					retryOnFail: true,
+					maxRetries: 3,
+					retryDelay: 0,
+					retryOnStatusCodes: '429,500,502,503,504',
+				},
+				'options.retryOnFail': true,
+				'options.maxRetries': 3,
+				'options.retryDelay': 0,
+				'options.retryOnStatusCodes': '429,500,502,503,504',
+			},
+			requestFn: async () => {
+				callCount++;
+				if (callCount === 1) {
+					const err: any = new Error('Connection timeout');
+					err.code = 'ETIMEDOUT';
+					throw err;
+				}
+				return {
+					body: { recovered: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(1);
+		expect(result[0][0].json).toHaveProperty('recovered', true);
+		expect(callCount).toBe(2);
+	});
+
+	// Connection Errors - ENOTFOUND
+	test('connection error ENOTFOUND is retried on fail', async () => {
+		let callCount = 0;
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(1),
+			continueOnFail: true,
+			params: {
+				'options': {
+					retryOnFail: true,
+					maxRetries: 3,
+					retryDelay: 0,
+					retryOnStatusCodes: '429,500,502,503,504',
+				},
+				'options.retryOnFail': true,
+				'options.maxRetries': 3,
+				'options.retryDelay': 0,
+				'options.retryOnStatusCodes': '429,500,502,503,504',
+			},
+			requestFn: async () => {
+				callCount++;
+				if (callCount === 1) {
+					const err: any = new Error('getaddrinfo ENOTFOUND example.com');
+					err.code = 'ENOTFOUND';
+					throw err;
+				}
+				return {
+					body: { resolved: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(1);
+		expect(result[0][0].json).toHaveProperty('resolved', true);
+		expect(callCount).toBe(2);
+	});
+
+	// Connection error exhaustion - still kept as error after max retries
+	test('connection error exhaustion keeps error in output', async () => {
+		let callCount = 0;
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(1),
+			continueOnFail: true,
+			params: {
+				'options': {
+					retryOnFail: true,
+					maxRetries: 2,
+					retryDelay: 0,
+					retryOnStatusCodes: '500',
+				},
+				'options.retryOnFail': true,
+				'options.maxRetries': 2,
+				'options.retryDelay': 0,
+				'options.retryOnStatusCodes': '500',
+			},
+			requestFn: async () => {
+				callCount++;
+				const err: any = new Error('Connection refused');
+				err.code = 'ECONNREFUSED';
+				throw err;
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(1);
+		expect(result[0][0].json).toHaveProperty('error');
+		// Should have been retried: 1 initial + 2 retries = 3 calls
+		expect(callCount).toBe(3);
+	});
+
+	// Connection error not retried when retryOnFail disabled
+	test('connection error is not retried when retryOnFail is false', async () => {
+		let callCount = 0;
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(1),
+			continueOnFail: true,
+			params: {
+				'options': {
+					retryOnFail: false,
+				},
+				'options.retryOnFail': false,
+			},
+			requestFn: async () => {
+				callCount++;
+				const err: any = new Error('Connection reset');
+				err.code = 'ECONNRESET';
+				throw err;
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(1);
+		expect(result[0][0].json).toHaveProperty('error');
+		// Only 1 call - no retries
+		expect(callCount).toBe(1);
+	});
+
+	// Mixed: connection error and HTTP status code both retried
+	test('connection errors and HTTP status codes are both retried', async () => {
+		let itemIndex = 0;
+		let callCountItem0 = 0;
+		let callCountItem1 = 0;
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(2),
+			continueOnFail: true,
+			params: {
+				'options': {
+					retryOnFail: true,
+					maxRetries: 2,
+					retryDelay: 0,
+					retryOnStatusCodes: '500',
+				},
+				'options.retryOnFail': true,
+				'options.maxRetries': 2,
+				'options.retryDelay': 0,
+				'options.retryOnStatusCodes': '500',
+			},
+			requestFn: async (opts) => {
+				itemIndex++;
+				// Item 0: connection error
+				if (itemIndex === 1) {
+					callCountItem0++;
+					if (callCountItem0 === 1) {
+						const err: any = new Error('Connection refused');
+						err.code = 'ECONNREFUSED';
+						throw err;
+					}
+					return {
+						body: { item: 0, success: true },
+						headers: { 'content-type': 'application/json' },
+						statusCode: 200,
+						statusMessage: 'OK',
+					};
+				}
+				// Item 1: HTTP 500 error
+				if (itemIndex === 2) {
+					callCountItem1++;
+					if (callCountItem1 === 1) {
+						const err: any = new Error('Server Error');
+						err.statusCode = 500;
+						throw err;
+					}
+					return {
+						body: { item: 1, success: true },
+						headers: { 'content-type': 'application/json' },
+						statusCode: 200,
+						statusMessage: 'OK',
+					};
+				}
+				return {
+					body: {},
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(2);
+		// Both items should succeed after retry
+		expect(result[0][0].json).toHaveProperty('item', 0);
+		expect(result[0][0].json).not.toHaveProperty('error');
+		expect(result[0][1].json).toHaveProperty('item', 1);
+		expect(result[0][1].json).not.toHaveProperty('error');
 	});
 });

@@ -1222,7 +1222,13 @@ export class BetterHttpRequest implements INodeType {
 			} catch (error) {
 				if (!this.continueOnFail()) throw error;
 				returnItems.push({
-					json: { error: (error as Error).message },
+					json: {
+						error: {
+							message: (error as Error).message,
+							code: (error as any).code,
+							statusCode: (error as any).statusCode,
+						},
+					},
 					pairedItem: { item: itemIndex },
 				});
 				continue;
@@ -1259,6 +1265,14 @@ export class BetterHttpRequest implements INodeType {
 					.filter((n) => !isNaN(n)),
 			);
 
+			// Connection error codes to retry
+			const retryOnErrorCodes = new Set([
+				'ECONNREFUSED',
+				'ECONNRESET',
+				'ETIMEDOUT',
+				'ENOTFOUND',
+			]);
+
 			for (let attempt = 0; attempt < maxRetries; attempt++) {
 				const failedIndices: number[] = [];
 
@@ -1267,15 +1281,18 @@ export class BetterHttpRequest implements INodeType {
 					if (item.json && item.json.error) {
 						const errObj = item.json.error;
 						let statusCode: number | undefined;
+						let errorCode: string | undefined;
 						if (typeof errObj === 'object' && errObj !== null) {
 							statusCode =
 								(errObj as any).statusCode ??
-								(errObj as any).httpCode ??
-								(errObj as any).code;
+								(errObj as any).httpCode;
+							errorCode = (errObj as any).code;
 						}
 						if (
-							statusCode !== undefined &&
-							retryOnStatusCodes.has(statusCode)
+							(statusCode !== undefined &&
+								retryOnStatusCodes.has(statusCode)) ||
+							(errorCode !== undefined &&
+								retryOnErrorCodes.has(errorCode))
 						) {
 							failedIndices.push(i);
 						}
@@ -1424,12 +1441,21 @@ export class BetterHttpRequest implements INodeType {
 									typeof bodyData === 'object' &&
 									bodyData !== null
 								) {
-									returnItems[idx] = {
-										json: bodyData,
-										pairedItem: {
-											item: originalItemIndex,
-										},
-									};
+									if (Object.keys(bodyData).length === 0) {
+										returnItems[idx] = {
+											json: { item: originalItemIndex },
+											pairedItem: {
+												item: originalItemIndex,
+											},
+										};
+									} else {
+										returnItems[idx] = {
+											json: bodyData,
+											pairedItem: {
+												item: originalItemIndex,
+											},
+										};
+									}
 								} else {
 									returnItems[idx] = {
 										json: { data: bodyData },
@@ -1443,10 +1469,17 @@ export class BetterHttpRequest implements INodeType {
 							typeof response === 'object' &&
 							response !== null
 						) {
-							returnItems[idx] = {
-								json: response,
-								pairedItem: { item: originalItemIndex },
-							};
+							if (Object.keys(response).length === 0) {
+								returnItems[idx] = {
+									json: { item: originalItemIndex },
+									pairedItem: { item: originalItemIndex },
+								};
+							} else {
+								returnItems[idx] = {
+									json: response,
+									pairedItem: { item: originalItemIndex },
+								};
+							}
 						} else {
 							try {
 								const parsed = JSON.parse(response);
