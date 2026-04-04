@@ -145,7 +145,8 @@ export class BetterHttpRequest implements INodeType {
 
 		let returnItems: INodeExecutionData[] = [];
 		const errorItems: { [key: string]: string } = {};
-		const requestPromises: Array<Promise<any>> = [];
+		const MAX_CONCURRENT_REQUESTS = 10;
+		const requestExecutors: Array<(() => Promise<any>) | undefined> = new Array(items.length);
 
 		let fullResponse = false;
 		let autoDetectResponseFormat = false;
@@ -171,11 +172,14 @@ export class BetterHttpRequest implements INodeType {
 			requestInterval: number;
 		} | null;
 
-		const requests: Array<{
-			options: IRequestOptions;
-			authKeys: IAuthDataSanitizeKeys;
-			credentialType?: string;
-		}> = [];
+		const requests: Array<
+			| {
+				options: IRequestOptions;
+				authKeys: IAuthDataSanitizeKeys;
+				credentialType?: string;
+			}
+			| undefined
+		> = new Array(items.length);
 
 		const updadeQueryParameter = updadeQueryParameterConfig(nodeVersion);
 
@@ -682,11 +686,13 @@ export class BetterHttpRequest implements INodeType {
 					}
 				}
 
-				requests.push({
-					options: requestOptions,
+				const itemRequestOptions = requestOptions;
+
+				requests[itemIndex] = {
+					options: itemRequestOptions,
 					authKeys: authDataKeys,
 					credentialType: nodeCredentialType,
-				});
+				};
 
 				if (pagination && pagination.paginationMode !== 'off') {
 					let continueExpression = '={{false}}';
@@ -787,11 +793,11 @@ export class BetterHttpRequest implements INodeType {
 						paginationData.binaryResult = true;
 					}
 
-					const requestPromise =
-						this.helpers.requestWithAuthenticationPaginated
+					requestExecutors[itemIndex] = async () => {
+						return await this.helpers.requestWithAuthenticationPaginated
 							.call(
 								this,
-								requestOptions,
+								itemRequestOptions,
 								itemIndex,
 								paginationData,
 								nodeCredentialType ?? genericCredentialType,
@@ -816,98 +822,138 @@ export class BetterHttpRequest implements INodeType {
 								}
 								throw error;
 							});
-					requestPromises.push(requestPromise);
+					};
 				} else if (
 					authentication === 'genericCredentialType' ||
 					authentication === 'none'
 				) {
 					if (oAuth1Api) {
-						const requestOAuth1 = this.helpers.requestOAuth1.call(
-							this,
-							'oAuth1Api',
-							requestOptions,
-						);
-						requestOAuth1.catch(() => {});
-						requestPromises.push(requestOAuth1);
+						requestExecutors[itemIndex] = async () =>
+							await this.helpers.requestOAuth1.call(
+								this,
+								'oAuth1Api',
+								itemRequestOptions,
+							);
 					} else if (oAuth2Api) {
-						const requestOAuth2 = this.helpers.requestOAuth2.call(
-							this,
-							'oAuth2Api',
-							requestOptions,
-							{ tokenType: 'Bearer' },
-						);
-						requestOAuth2.catch(() => {});
-						requestPromises.push(requestOAuth2);
+						requestExecutors[itemIndex] = async () =>
+							await this.helpers.requestOAuth2.call(
+								this,
+								'oAuth2Api',
+								itemRequestOptions,
+								{ tokenType: 'Bearer' },
+							);
 					} else {
-						const request = this.helpers.request(requestOptions);
-						request.catch(() => {});
-						requestPromises.push(request);
+						requestExecutors[itemIndex] = async () =>
+							await this.helpers.request(itemRequestOptions);
 					}
 				} else if (
 					authentication === 'predefinedCredentialType' &&
 					nodeCredentialType
 				) {
+					const credentialType = nodeCredentialType;
 					const additionalOAuth2Options =
-						getOAuth2AdditionalParameters(nodeCredentialType);
-					const requestWithAuthentication =
-						this.helpers.requestWithAuthentication.call(
+						getOAuth2AdditionalParameters(credentialType);
+					requestExecutors[itemIndex] = async () =>
+						await this.helpers.requestWithAuthentication.call(
 							this,
-							nodeCredentialType,
-							requestOptions,
+							credentialType,
+							itemRequestOptions,
 							additionalOAuth2Options && {
 								oauth2: additionalOAuth2Options,
 							},
 							itemIndex,
 						);
-					requestWithAuthentication.catch(() => {});
-					requestPromises.push(requestWithAuthentication);
 				}
 			} catch (error) {
 				if (!this.continueOnFail()) throw error;
-				requestPromises.push(
-					Promise.reject(error).catch(() => {}),
-				);
 				errorItems[itemIndex] = (error as Error).message;
 				continue;
 			}
 		}
 
-		const sanitizedRequests: IDataObject[] = [];
-		const promisesResponses = await Promise.allSettled(
-			requestPromises.map(async (requestPromise, itemIndex) =>
-				await requestPromise
-					.then((response: any) => response)
-					.finally(async () => {
-						if (errorItems[itemIndex]) return;
-						try {
-							const { options, authKeys, credentialType } =
-								requests[itemIndex];
-							let secrets: string[] = [];
-							if (credentialType) {
-								const properties =
-									this.getCredentialsProperties(credentialType);
-								const credentials = await this.getCredentials(
-									credentialType,
-									itemIndex,
-								);
-								secrets = getSecrets(properties, credentials);
-							}
-							const sanitizedRequestOptions = sanitizeUiMessage(
-								options,
-								authKeys,
-								secrets,
-							);
-							sanitizedRequests.push(sanitizedRequestOptions);
-							this.sendMessageToUI(sanitizedRequestOptions);
-						} catch {}
-					}),
-			),
-		);
+		const sanitizedRequests: Array<IDataObject | undefined> = new Array(items.length);
+		const promisesResponses: Array<PromiseSettledResult<any>> = new Array(items.length);
+		const inFlightTasks = new Set<Promise<void>>();
+
+		const executeRequestWithTracking = async (
+			itemIndex: number,
+			executor: () => Promise<any>,
+		): Promise<void> => {
+			try {
+				const value = await executor();
+				promisesResponses[itemIndex] = {
+					status: 'fulfilled',
+					value,
+				};
+			} catch (reason) {
+				promisesResponses[itemIndex] = {
+					status: 'rejected',
+					reason,
+				};
+			} finally {
+				if (errorItems[itemIndex]) return;
+				try {
+					const requestData = requests[itemIndex];
+					if (!requestData) return;
+
+					const { options, authKeys, credentialType } = requestData;
+					let secrets: string[] = [];
+					if (credentialType) {
+						const properties = this.getCredentialsProperties(credentialType);
+						const credentials = await this.getCredentials(
+							credentialType,
+							itemIndex,
+						);
+						secrets = getSecrets(properties, credentials);
+					}
+					const sanitizedRequestOptions = sanitizeUiMessage(
+						options,
+						authKeys,
+						secrets,
+					);
+					sanitizedRequests[itemIndex] = sanitizedRequestOptions;
+					this.sendMessageToUI(sanitizedRequestOptions);
+				} catch {}
+			}
+		};
+
+		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+			if (errorItems[itemIndex]) {
+				promisesResponses[itemIndex] = {
+					status: 'fulfilled',
+					value: undefined,
+				};
+				continue;
+			}
+
+			const executor = requestExecutors[itemIndex];
+			if (!executor) {
+				promisesResponses[itemIndex] = {
+					status: 'fulfilled',
+					value: undefined,
+				};
+				continue;
+			}
+
+			while (inFlightTasks.size >= MAX_CONCURRENT_REQUESTS) {
+				await Promise.race(inFlightTasks);
+			}
+
+			let task: Promise<void>;
+			task = executeRequestWithTracking(itemIndex, executor).finally(() => {
+				inFlightTasks.delete(task);
+			});
+			inFlightTasks.add(task);
+		}
+
+		if (inFlightTasks.size > 0) {
+			await Promise.all(inFlightTasks);
+		}
 
 		let responseData: any;
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
-				responseData = promisesResponses.shift();
+				responseData = promisesResponses[itemIndex];
 
 				if (errorItems[itemIndex]) {
 					returnItems.push({
