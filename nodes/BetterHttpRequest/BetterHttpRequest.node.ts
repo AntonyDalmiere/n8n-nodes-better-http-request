@@ -44,13 +44,20 @@ import {
 } from './helpers';
 import type { BodyParameter, IAuthDataSanitizeKeys, HttpSslAuthCredentials } from './helpers';
 
+/**
+ * Converts any data type to text representation
+ * Stringifies objects/arrays, returns primitives as-is
+ */
 function toText<T>(data: T) {
 	if (typeof data === 'object' && data !== null) {
 		return JSON.stringify(data);
 	}
 	return data;
 }
-
+/**
+ * Parses JSON string and throws descriptive error if invalid
+ * Used for parsing JSON body, query params, and headers
+ */
 function parseJsonParameter(
 	node: INode,
 	jsonString: string,
@@ -68,6 +75,10 @@ function parseJsonParameter(
 	}
 }
 
+/**
+ * Validates whether a URL's hostname is in the allowed domains list
+ * Supports exact matches and subdomains (e.g., 'example.com' allows 'sub.example.com')
+ */
 function isDomainAllowedLocal(url: string, opts: { allowedDomains: string }): boolean {
 	try {
 		const parsedUrl = new URL(url);
@@ -113,12 +124,20 @@ export class BetterHttpRequest implements INodeType {
 		properties: mainProperties,
 	};
 
+	/**
+	 * Main execution function that processes HTTP requests for all input items
+	 * Handles authentication, request building, concurrent execution, and retry logic
+	 */
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+		// Get all input items to process
 		const items = this.getInputData();
+		// Node version determines API behavior (e.g., redirect handling)
 		const nodeVersion = this.getNode().typeVersion;
 
+		// Properties included in full response mode
 		const fullResponseProperties = ['body', 'headers', 'statusCode', 'statusMessage'];
 
+		// Determine authentication method: predefined (e.g., OAuth), generic (Basic, Bearer, etc.), or none
 		let authentication: 'predefinedCredentialType' | 'genericCredentialType' | 'none' | undefined;
 		try {
 			authentication = this.getNodeParameter('authentication', 0) as
@@ -127,6 +146,7 @@ export class BetterHttpRequest implements INodeType {
 				| 'none';
 		} catch {}
 
+		// Credential variables for different authentication types
 		let httpBasicAuth: IDataObject | undefined;
 		let httpBearerAuth: IDataObject | undefined;
 		let httpDigestAuth: IDataObject | undefined;
@@ -143,15 +163,21 @@ export class BetterHttpRequest implements INodeType {
 			uri: '',
 		};
 
+		// Results collection and error tracking
 		let returnItems: INodeExecutionData[] = [];
+		// Store errors encountered during request building phase
 		const errorItems: { [key: string]: string } = {};
+		// Max concurrent requests to prevent overwhelming the system
 		const MAX_CONCURRENT_REQUESTS = 10;
+		// Response executors for concurrent execution with Promise.allSettled
 		const requestExecutors: Array<(() => Promise<any>) | undefined> = new Array(items.length);
 
+		// Response formatting flags
 		let fullResponse = false;
 		let autoDetectResponseFormat = false;
 		let responseFileName: string | undefined;
 
+		// Pagination configuration for handling API pagination scenarios
 		const pagination = this.getNodeParameter('options.pagination.pagination', 0, null, {
 			rawExpressions: true,
 		}) as {
@@ -172,6 +198,7 @@ export class BetterHttpRequest implements INodeType {
 			requestInterval: number;
 		} | null;
 
+		// Store prepared request options for each item (needed for retries and logging)
 		const requests: Array<
 			| {
 				options: IRequestOptions;
@@ -181,10 +208,13 @@ export class BetterHttpRequest implements INodeType {
 			| undefined
 		> = new Array(items.length);
 
+		// Get query parameter update function based on node version
 		const updadeQueryParameter = updadeQueryParameterConfig(nodeVersion);
 
+		// === BUILD PHASE: Process each item and prepare request executors ===
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
+				// === Credential Handling: Load appropriate auth credentials ===
 				if (authentication === 'genericCredentialType') {
 					genericCredentialType = this.getNodeParameter('genericAuthType', 0) as string;
 
@@ -212,8 +242,10 @@ export class BetterHttpRequest implements INodeType {
 					) as string;
 				}
 
+				// === URL Validation ===
 				const url = this.getNodeParameter('url', itemIndex);
 
+				// Ensure URL is string type
 				if (typeof url !== 'string') {
 					const actualType = url === null ? 'null' : typeof url;
 					throw new NodeOperationError(
@@ -222,6 +254,7 @@ export class BetterHttpRequest implements INodeType {
 					);
 				}
 
+				// Ensure URL uses http/https protocol
 				if (!url.startsWith('http://') && !url.startsWith('https://')) {
 					throw new NodeOperationError(
 						this.getNode(),
@@ -229,6 +262,8 @@ export class BetterHttpRequest implements INodeType {
 					);
 				}
 
+				// === Domain Restriction Validation ===
+				// Helper function to check if credential allows access to requested URL
 				const checkDomainRestrictions = async (
 					credentialData: IDataObject,
 					requestUrl: string,
@@ -282,6 +317,7 @@ export class BetterHttpRequest implements INodeType {
 					}
 				}
 
+				// === SSL Certificate Configuration ===
 				const provideSslCertificates = this.getNodeParameter(
 					'provideSslCertificates',
 					itemIndex,
@@ -294,6 +330,7 @@ export class BetterHttpRequest implements INodeType {
 					)) as unknown as HttpSslAuthCredentials;
 				}
 
+				// === Request Method & Query Parameters ===
 				const requestMethod = this.getNodeParameter(
 					'method',
 					itemIndex,
@@ -316,6 +353,7 @@ export class BetterHttpRequest implements INodeType {
 					'',
 				) as string;
 
+				// === Request Body Configuration ===
 				const sendBody = this.getNodeParameter('sendBody', itemIndex, false) as boolean;
 				const bodyContentType = this.getNodeParameter(
 					'contentType',
@@ -335,6 +373,7 @@ export class BetterHttpRequest implements INodeType {
 				) as string;
 				const body = this.getNodeParameter('body', itemIndex, '') as string;
 
+				// === Request Headers Configuration ===
 				const sendHeaders = this.getNodeParameter(
 					'sendHeaders',
 					itemIndex,
@@ -356,6 +395,8 @@ export class BetterHttpRequest implements INodeType {
 					'',
 				) as string;
 
+				// === Advanced Request Options ===
+				// Extract options for redirects, batching, proxy, timeouts, and response handling
 				const {
 					redirect,
 					batching,
@@ -385,21 +426,26 @@ export class BetterHttpRequest implements INodeType {
 					sendCredentialsOnCrossOriginRedirect?: boolean;
 				};
 
+				// Extract response formatting configuration
 				responseFileName = response?.response?.outputPropertyName;
 				const responseFormat = response?.response?.responseFormat || 'autodetect';
 				fullResponse = response?.response?.fullResponse || false;
 				autoDetectResponseFormat = responseFormat === 'autodetect';
 
+				// Configure batch size and interval for rate limiting
 				const batchSize =
 					batching?.batch?.batchSize > 0 ? batching?.batch?.batchSize : 1;
 				const batchInterval = batching?.batch?.batchInterval;
 
+				// Apply delay between batches if configured (rate limiting)
 				if (itemIndex > 0 && batchSize >= 0 && batchInterval > 0) {
 					if (itemIndex % batchSize === 0) {
 						await sleep(batchInterval);
 					}
 				}
 
+				// === Initialize Request Options ===
+				// Base configuration for HTTP request
 				requestOptions = {
 					headers: {},
 					method: requestMethod,
@@ -445,6 +491,8 @@ export class BetterHttpRequest implements INodeType {
 					});
 				}
 
+				// === Parameter Processing Helper ===
+				// Converts parameters to key-value format, handles binary data uploads
 				const parametersToKeyValue = async (
 					accumulator: { [key: string]: any },
 					cur: {
@@ -479,6 +527,7 @@ export class BetterHttpRequest implements INodeType {
 					return accumulator;
 				};
 
+				// === Build Request Body ===
 				if (sendBody && bodyParameters) {
 					if (specifyBody === 'keypair' || bodyContentType === 'multipart-form-data') {
 						requestOptions.body = await prepareRequestBody(
@@ -548,6 +597,7 @@ export class BetterHttpRequest implements INodeType {
 					}
 				}
 
+				// === Build Query String Parameters ===
 				if (sendQuery && queryParameters) {
 					if (specifyQuery === 'keypair') {
 						requestOptions.qs = await reduceAsync(
@@ -564,6 +614,7 @@ export class BetterHttpRequest implements INodeType {
 					}
 				}
 
+				// === Build Custom Request Headers ===
 				if (sendHeaders && headerParameters) {
 					let additionalHeaders: IDataObject = {};
 					if (specifyHeaders === 'keypair') {
@@ -587,6 +638,8 @@ export class BetterHttpRequest implements INodeType {
 					};
 				}
 
+				// === Configure Response Encoding ===
+				// For file/binary responses, use streaming; for JSON, parse automatically
 				if (autoDetectResponseFormat || responseFormat === 'file') {
 					requestOptions.encoding = null;
 					requestOptions.json = false;
@@ -610,11 +663,14 @@ export class BetterHttpRequest implements INodeType {
 				}
 
 				const authDataKeys: IAuthDataSanitizeKeys = {};
+				// === Attach Authentication to Request ===
+				// Configure SSL/TLS options if provided
 				setAgentOptions(requestOptions, sslCertificates);
 				if (requestOptions.agentOptions) {
 					authDataKeys.agentOptions = Object.keys(requestOptions.agentOptions);
 				}
 
+				// Attach appropriate authentication method to request
 				if (httpBasicAuth !== undefined) {
 					requestOptions.auth = {
 						user: httpBasicAuth.user as string,
@@ -871,11 +927,13 @@ export class BetterHttpRequest implements INodeType {
 			}
 		}
 
+// === EXECUTION PHASE: Execute all requests concurrently ===
 		const sanitizedRequests: Array<IDataObject | undefined> = new Array(items.length);
 		const promisesResponses: Array<PromiseSettledResult<any>> = new Array(items.length);
+		// Track in-flight tasks to manage concurrency (max 10 concurrent requests)
 		const inFlightTasks = new Set<Promise<void>>();
 
-		// Progress tracking
+		// Progress tracking for UI updates
 		let completedCount = 0;
 		const totalCount = items.length;
 
@@ -890,6 +948,8 @@ export class BetterHttpRequest implements INodeType {
 			});
 		};
 
+		// === Request Execution Helper ===
+		// Executes request and tracks progress/sanitization
 		const executeRequestWithTracking = async (
 			itemIndex: number,
 			executor: () => Promise<any>,
@@ -936,16 +996,18 @@ export class BetterHttpRequest implements INodeType {
 			}
 		};
 
-	for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
-		if (errorItems[itemIndex]) {
-			promisesResponses[itemIndex] = {
-				status: 'fulfilled',
-				value: undefined,
-			};
-			continue;
-		}
+		// === Queue Request Execution ===
+		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+			// Skip items with build-phase errors
+			if (errorItems[itemIndex]) {
+				promisesResponses[itemIndex] = {
+					status: 'fulfilled',
+					value: undefined,
+				};
+				continue;
+			}
 
-		const executor = requestExecutors[itemIndex];
+			const executor = requestExecutors[itemIndex];
 		if (!executor) {
 			promisesResponses[itemIndex] = {
 				status: 'fulfilled',
@@ -954,21 +1016,25 @@ export class BetterHttpRequest implements INodeType {
 			continue;
 		}
 
-		while (inFlightTasks.size >= MAX_CONCURRENT_REQUESTS) {
-			await Promise.race(inFlightTasks);
-		}
+			// If max concurrent requests reached, wait for one to complete
+			while (inFlightTasks.size >= MAX_CONCURRENT_REQUESTS) {
+				await Promise.race(inFlightTasks);
+			}
 
-		let task: Promise<void>;
-		task = executeRequestWithTracking(itemIndex, executor).finally(() => {
-			inFlightTasks.delete(task);
-		});
-		inFlightTasks.add(task);
+			// Queue task for execution
+			let task: Promise<void>;
+			task = executeRequestWithTracking(itemIndex, executor).finally(() => {
+				inFlightTasks.delete(task);
+			});
+			inFlightTasks.add(task);
 	}
 
+		// === Wait for all requests to complete ===
 		if (inFlightTasks.size > 0) {
 			await Promise.all(inFlightTasks);
 		}
 
+		// === RESPONSE PROCESSING PHASE: Process results and build output ===
 		let responseData: any;
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
@@ -1301,6 +1367,7 @@ export class BetterHttpRequest implements INodeType {
 		}
 
 		// ─── Retry Only Failed Items Feature ────────────────────────────────────
+		// Implement retry logic for failed requests with configurable status codes
 		const retryOnFail = this.getNodeParameter(
 			'options.retryOnFail',
 			0,
@@ -1308,6 +1375,7 @@ export class BetterHttpRequest implements INodeType {
 		) as boolean;
 
 		if (retryOnFail && this.continueOnFail()) {
+			// Retry settings: max attempts, delay between retries, and status codes to retry on
 			const maxRetries = this.getNodeParameter(
 				'options.maxRetries',
 				0,
@@ -1323,6 +1391,7 @@ export class BetterHttpRequest implements INodeType {
 				0,
 				'429,500,502,503,504',
 			) as string;
+			// Parse status codes to retry on (e.g., 429=Too Many Requests, 5xx=Server Errors)
 			const retryOnStatusCodes = new Set(
 				retryOnStatusCodesStr
 					.split(',')
@@ -1330,7 +1399,7 @@ export class BetterHttpRequest implements INodeType {
 					.filter((n) => !isNaN(n)),
 			);
 
-			// Connection error codes to retry
+			// Connection error codes to retry (network-level failures)
 			const retryOnErrorCodes = new Set([
 				'ECONNREFUSED',
 				'ECONNRESET',
@@ -1338,9 +1407,12 @@ export class BetterHttpRequest implements INodeType {
 				'ENOTFOUND',
 			]);
 
+			// Retry loop: attempt up to maxRetries times
 			for (let attempt = 0; attempt < maxRetries; attempt++) {
+				// Collect indices of failed items that should be retried
 				const failedIndices: number[] = [];
 
+				// Identify items with retryable errors
 				for (let i = 0; i < returnItems.length; i++) {
 					const item = returnItems[i];
 					if (item.json && item.json.error) {
@@ -1353,6 +1425,7 @@ export class BetterHttpRequest implements INodeType {
 								(errObj as any).httpCode;
 							errorCode = (errObj as any).code;
 						}
+						// Check if error matches retry criteria
 						if (
 							(statusCode !== undefined &&
 								retryOnStatusCodes.has(statusCode)) ||
@@ -1364,14 +1437,17 @@ export class BetterHttpRequest implements INodeType {
 					}
 				}
 
+				// If no failures, exit retry loop
 				if (failedIndices.length === 0) break;
 
-				// Determine delay: check for Retry-After header in any 429 response
+				// === Calculate effective retry delay ===
+				// Check for Retry-After header in 429 responses
 				let effectiveDelay = retryDelay;
 				for (const idx of failedIndices) {
 					const errObj = returnItems[idx].json.error;
 					if (typeof errObj === 'object' && errObj !== null) {
 						const sc = (errObj as any).statusCode;
+						// For rate-limited requests, respect server's Retry-After header
 						if (sc === 429) {
 							const retryAfterHeader =
 								(errObj as any).headers?.['retry-after'] ??
@@ -1392,16 +1468,18 @@ export class BetterHttpRequest implements INodeType {
 					}
 				}
 
+				// Wait before retrying
 				if (effectiveDelay > 0) {
 					await sleep(effectiveDelay);
 				}
 
-				// Retry failed items
+				// === Re-execute failed requests ===
 				const retryPromises: Array<{
 					index: number;
 					promise: Promise<any>;
 				}> = [];
 
+				// Queue retry requests for failed items
 				for (const idx of failedIndices) {
 					const originalItemIndex =
 						returnItems[idx].pairedItem &&
@@ -1411,6 +1489,7 @@ export class BetterHttpRequest implements INodeType {
 									.item
 							: idx;
 
+					// Re-execute the original request for this item
 					if (requests[originalItemIndex]) {
 						const { options } = requests[originalItemIndex];
 						const retryRequest = this.helpers
@@ -1423,10 +1502,12 @@ export class BetterHttpRequest implements INodeType {
 					}
 				}
 
+				// Wait for all retry requests to settle
 				const retryResults = await Promise.allSettled(
 					retryPromises.map((r) => r.promise),
 				);
 
+				// === Process retry results and update return items ===
 				for (let ri = 0; ri < retryResults.length; ri++) {
 					const result = retryResults[ri];
 					const idx = retryPromises[ri].index;
@@ -1438,6 +1519,7 @@ export class BetterHttpRequest implements INodeType {
 									.item
 							: idx;
 
+					// If retry succeeded, process the new response
 					if (result.status === 'fulfilled' && result.value != null) {
 						const response = result.value;
 						// Successfully retried - process the response
@@ -1569,8 +1651,12 @@ export class BetterHttpRequest implements INodeType {
 			}
 		}
 
+		// === Final Cleanup ===
+		// Replace null values with empty strings to avoid serialization issues
 		returnItems = returnItems.map(replaceNullValues);
 
+		// === Execution Hint for UI ===
+		// Provide helpful message if response contains array data that could be split
 		if (
 			returnItems.length === 1 &&
 			returnItems[0].json.data &&
@@ -1588,6 +1674,7 @@ export class BetterHttpRequest implements INodeType {
 			}
 		}
 
+		// Return all processed items
 		return [returnItems];
 	}
 }
