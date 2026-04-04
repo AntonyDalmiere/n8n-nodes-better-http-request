@@ -875,6 +875,21 @@ export class BetterHttpRequest implements INodeType {
 		const promisesResponses: Array<PromiseSettledResult<any>> = new Array(items.length);
 		const inFlightTasks = new Set<Promise<void>>();
 
+		// Progress tracking
+		let completedCount = 0;
+		const totalCount = items.length;
+
+		const reportProgress = () => {
+			const percentage = Math.round((completedCount / totalCount) * 100);
+			this.sendMessageToUI({
+				type: 'progress',
+				message: `${percentage}% complete (${completedCount}/${totalCount} items)`,
+				percentage,
+				completed: completedCount,
+				total: totalCount,
+			});
+		};
+
 		const executeRequestWithTracking = async (
 			itemIndex: number,
 			executor: () => Promise<any>,
@@ -914,37 +929,41 @@ export class BetterHttpRequest implements INodeType {
 					sanitizedRequests[itemIndex] = sanitizedRequestOptions;
 					this.sendMessageToUI(sanitizedRequestOptions);
 				} catch {}
+
+				// Report progress
+				completedCount++;
+				reportProgress();
 			}
 		};
 
-		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
-			if (errorItems[itemIndex]) {
-				promisesResponses[itemIndex] = {
-					status: 'fulfilled',
-					value: undefined,
-				};
-				continue;
-			}
-
-			const executor = requestExecutors[itemIndex];
-			if (!executor) {
-				promisesResponses[itemIndex] = {
-					status: 'fulfilled',
-					value: undefined,
-				};
-				continue;
-			}
-
-			while (inFlightTasks.size >= MAX_CONCURRENT_REQUESTS) {
-				await Promise.race(inFlightTasks);
-			}
-
-			let task: Promise<void>;
-			task = executeRequestWithTracking(itemIndex, executor).finally(() => {
-				inFlightTasks.delete(task);
-			});
-			inFlightTasks.add(task);
+	for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+		if (errorItems[itemIndex]) {
+			promisesResponses[itemIndex] = {
+				status: 'fulfilled',
+				value: undefined,
+			};
+			continue;
 		}
+
+		const executor = requestExecutors[itemIndex];
+		if (!executor) {
+			promisesResponses[itemIndex] = {
+				status: 'fulfilled',
+				value: undefined,
+			};
+			continue;
+		}
+
+		while (inFlightTasks.size >= MAX_CONCURRENT_REQUESTS) {
+			await Promise.race(inFlightTasks);
+		}
+
+		let task: Promise<void>;
+		task = executeRequestWithTracking(itemIndex, executor).finally(() => {
+			inFlightTasks.delete(task);
+		});
+		inFlightTasks.add(task);
+	}
 
 		if (inFlightTasks.size > 0) {
 			await Promise.all(inFlightTasks);
