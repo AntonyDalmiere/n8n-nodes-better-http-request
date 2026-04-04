@@ -242,6 +242,32 @@ describe('BetterHttpRequest Node', () => {
 		expect(result[0][4999].json).toEqual({ item: 4999 });
 	}, 30000);
 
+	// 3c. High-volume execution is bounded by internal concurrency cap
+	test('limits in-flight requests under high load', async () => {
+		let inFlight = 0;
+		let maxInFlight = 0;
+
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(200),
+			requestFn: async () => {
+				inFlight++;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await new Promise((resolve) => setTimeout(resolve, 2));
+				inFlight--;
+				return {
+					body: { ok: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+		expect(result[0]).toHaveLength(200);
+		expect(maxInFlight).toBeLessThanOrEqual(10);
+	}, 30000);
+
 	// 4. Continue on fail
 	test('continue on fail returns error items', async () => {
 		let callCount = 0;
