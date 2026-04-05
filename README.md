@@ -10,7 +10,6 @@ An enhanced **HTTP Request** community node for [n8n](https://n8n.io) that adds 
   - Configurable delay between retries (default: 1000 ms).
   - Configurable list of retriable status codes (default: `429,500,502,503,504`).
   - Respects the `Retry-After` response header for HTTP 429 responses.
-- **Domain restrictions** – credential-level allowlists prevent requests from being sent to unauthorized domains.
 
 ## Installation
 

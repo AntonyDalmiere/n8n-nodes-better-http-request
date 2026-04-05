@@ -41,7 +41,7 @@ import {
 } from './helpers';
 import type { BodyParameter, IAuthDataSanitizeKeys, HttpSslAuthCredentials } from './helpers';
 import { parseJsonParameter, toText } from './RequestUtils';
-import { validateUrl, checkDomainRestrictions } from './DomainValidator';
+import { validateUrl } from './DomainValidator';
 import { applyAllCredentials } from './CredentialHandler';
 import {
 	ACCEPT_HEADERS,
@@ -203,41 +203,6 @@ export class BetterHttpRequest implements INodeType {
 				// === URL Validation ===
 				const url = this.getNodeParameter('url', itemIndex);
 				validateUrl(this.getNode(), url, itemIndex);
-
-				// === Domain Restriction Validation ===
-				for (const credentialData of [
-					httpBasicAuth,
-					httpBearerAuth,
-					httpDigestAuth,
-					httpHeaderAuth,
-					httpQueryAuth,
-					httpCustomAuth,
-					oAuth1Api,
-					oAuth2Api,
-				]) {
-					if (!credentialData) continue;
-					await checkDomainRestrictions(this.getNode(), credentialData, url);
-				}
-
-				if (nodeCredentialType) {
-					try {
-						const credentialData = await this.getCredentials(nodeCredentialType, itemIndex);
-						await checkDomainRestrictions(
-							this.getNode(),
-							credentialData,
-							url,
-							nodeCredentialType,
-						);
-					} catch (error: any) {
-						if (
-							error.message?.includes('Domain not allowed') ||
-							error.message?.includes('configured to prevent') ||
-							error.message?.includes('No allowed domains specified')
-						) {
-							throw error;
-						}
-					}
-				}
 
 				// === SSL Certificate Configuration ===
 				const provideSslCertificates = this.getNodeParameter(
