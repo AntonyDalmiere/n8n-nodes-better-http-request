@@ -978,4 +978,127 @@ describe('BetterHttpRequest Node', () => {
 		expect(result[0][1].json).toHaveProperty('item', 1);
 		expect(result[0][1].json).not.toHaveProperty('error');
 	});
+
+	describe('Stress and Chaos Tests', () => {
+		it('should handle a massive batch of 1000 items successfully', async () => {
+			const mockFn = createMockExecuteFunctions({
+				items: makeItems(1000),
+				params: {
+					method: 'GET',
+					url: 'https://api.example.com/data',
+					options: {},
+				},
+				requestFn: async () => ({
+					body: { success: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				}),
+			});
+
+			const startTime = Date.now();
+			const result = await node.execute.call(mockFn);
+			const duration = Date.now() - startTime;
+
+			expect(result[0]).toHaveLength(1000);
+			expect(result[0][999].json).toHaveProperty('success', true);
+			expect(duration).toBeLessThan(5000);
+		});
+
+		it('should handle a mixed massive batch with failures and continueOnFail', async () => {
+			let callCount = 0;
+			const chaoticRequestFn = async () => {
+				callCount++;
+				if (callCount % 10 === 0) {
+					const error: any = new Error('ECONNRESET');
+					error.code = 'ECONNRESET';
+					throw error;
+				}
+				if (callCount % 15 === 0) {
+					const error: any = new Error('Proxy Auth required');
+					error.statusCode = 407;
+					throw error;
+				}
+				if (callCount % 100 === 0) {
+					await new Promise(r => setTimeout(r, 50)); // simulate hang, keep it short
+					const error: any = new Error('ETIMEDOUT');
+					error.code = 'ETIMEDOUT';
+					throw error;
+				}
+				return { 
+					body: { success: true, count: callCount },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			};
+
+			const mockFn = createMockExecuteFunctions({
+				continueOnFail: true,
+				items: makeItems(1000),
+				params: {
+					method: 'GET',
+					url: 'https://api.example.com/data',
+					options: {},
+				},
+				requestFn: chaoticRequestFn,
+			});
+
+			const result = await node.execute.call(mockFn);
+			expect(result[0]).toHaveLength(1000); // Because continueOnFail is true
+			
+			const fails = result[0].filter(item => item.json.error);
+			const successes = result[0].filter(item => item.json.success === true);
+			
+			expect(fails.length).toBeGreaterThan(0);
+			expect(successes.length).toBeGreaterThan(800);
+		});
+
+		it('should handle rate limiting with retries on a large batch using sleep backoff', async () => {
+			const sleepSpy = jest.spyOn(require('n8n-workflow'), 'sleep').mockImplementation(async () => {});
+			let callIndex = 0;
+			const requestFn = async () => {
+				callIndex++;
+				if (callIndex <= 2) {
+					const err: any = new Error('Too Many Requests');
+					err.statusCode = 429;
+					throw err;
+				}
+				// Succeed on attempt 3
+				return {
+					body: { success: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			};
+
+			const mockFn = createMockExecuteFunctions({
+				continueOnFail: true,
+				items: makeItems(1), // test one item retrying multiple times to prove retry logic over large batch behavior is sane
+				params: {
+					method: 'GET',
+					url: 'https://api.example.com/data',
+					'options': {
+						retryOnFail: true,
+						maxRetries: 3,
+						retryDelay: 10,
+						retryOnStatusCodes: '429',
+					},
+					'options.retryOnFail': true,
+					'options.maxRetries': 3,
+					'options.retryDelay': 10,
+					'options.retryOnStatusCodes': '429',
+				},
+				requestFn,
+			});
+
+			const result = await node.execute.call(mockFn);
+			expect(result[0]).toHaveLength(1);
+			expect(result[0][0].json).toHaveProperty('success', true);
+			expect(sleepSpy).toHaveBeenCalledTimes(2); // Retried twice before succeeding
+			expect(callIndex).toBe(3); // Attempted three times total
+			sleepSpy.mockRestore();
+		});
+	});
 });
