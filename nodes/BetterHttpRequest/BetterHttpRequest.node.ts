@@ -3,11 +3,9 @@ import type {
 	IBinaryKeyData,
 	IDataObject,
 	IExecuteFunctions,
-	INode,
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
-	IRequestOptionsSimplified,
 	PaginationOptions,
 	JsonObject,
 	IRequestOptions,
@@ -21,7 +19,6 @@ import {
 	jsonParse,
 	removeCircularRefs,
 	sleep,
-	ensureError,
 } from 'n8n-workflow';
 import type { Readable } from 'stream';
 
@@ -43,57 +40,20 @@ import {
 	configureResponseOptimizer,
 } from './helpers';
 import type { BodyParameter, IAuthDataSanitizeKeys, HttpSslAuthCredentials } from './helpers';
-
-/**
- * Converts any data type to text representation
- * Stringifies objects/arrays, returns primitives as-is
- */
-function toText<T>(data: T) {
-	if (typeof data === 'object' && data !== null) {
-		return JSON.stringify(data);
-	}
-	return data;
-}
-/**
- * Parses JSON string and throws descriptive error if invalid
- * Used for parsing JSON body, query params, and headers
- */
-function parseJsonParameter(
-	node: INode,
-	jsonString: string,
-	fieldName: string,
-	itemIndex: number,
-): IDataObject {
-	try {
-		return JSON.parse(jsonString) as IDataObject;
-	} catch (e) {
-		const error = ensureError(e);
-		throw new NodeOperationError(node, `The value in the "${fieldName}" field is not valid JSON`, {
-			itemIndex,
-			description: error.message,
-		});
-	}
-}
-
-/**
- * Validates whether a URL's hostname is in the allowed domains list
- * Supports exact matches and subdomains (e.g., 'example.com' allows 'sub.example.com')
- */
-function isDomainAllowedLocal(url: string, opts: { allowedDomains: string }): boolean {
-	try {
-		const parsedUrl = new URL(url);
-		const hostname = parsedUrl.hostname.toLowerCase();
-		const allowedDomains = opts.allowedDomains
-			.split(',')
-			.map((d: string) => d.trim().toLowerCase())
-			.filter((d: string) => d.length > 0);
-		return allowedDomains.some(
-			(domain: string) => hostname === domain || hostname.endsWith('.' + domain),
-		);
-	} catch {
-		return false;
-	}
-}
+import { parseJsonParameter, toText } from './RequestUtils';
+import { validateUrl, checkDomainRestrictions } from './DomainValidator';
+import { applyAllCredentials } from './CredentialHandler';
+import {
+	ACCEPT_HEADERS,
+	DEFAULT_MAX_RETRIES,
+	DEFAULT_RETRY_DELAY,
+	DEFAULT_RETRY_ON_STATUS_CODES,
+	DEFAULT_TIMEOUT_MS,
+	FULL_RESPONSE_PROPERTIES,
+	MAX_CONCURRENT_REQUESTS,
+	RETRYABLE_CONNECTION_ERRORS,
+	UI_MESSAGES,
+} from './constants';
 
 export class BetterHttpRequest implements INodeType {
 	description: INodeTypeDescription = {
@@ -135,7 +95,7 @@ export class BetterHttpRequest implements INodeType {
 		const nodeVersion = this.getNode().typeVersion;
 
 		// Properties included in full response mode
-		const fullResponseProperties = ['body', 'headers', 'statusCode', 'statusMessage'];
+		const fullResponseProperties = FULL_RESPONSE_PROPERTIES;
 
 		// Determine authentication method: predefined (e.g., OAuth), generic (Basic, Bearer, etc.), or none
 		let authentication: 'predefinedCredentialType' | 'genericCredentialType' | 'none' | undefined;
@@ -167,8 +127,6 @@ export class BetterHttpRequest implements INodeType {
 		let returnItems: INodeExecutionData[] = [];
 		// Store errors encountered during request building phase
 		const errorItems: { [key: string]: string } = {};
-		// Max concurrent requests to prevent overwhelming the system
-		const MAX_CONCURRENT_REQUESTS = 10;
 		// Response executors for concurrent execution with Promise.allSettled
 		const requestExecutors: Array<(() => Promise<any>) | undefined> = new Array(items.length);
 
@@ -244,68 +202,32 @@ export class BetterHttpRequest implements INodeType {
 
 				// === URL Validation ===
 				const url = this.getNodeParameter('url', itemIndex);
-
-				// Ensure URL is string type
-				if (typeof url !== 'string') {
-					const actualType = url === null ? 'null' : typeof url;
-					throw new NodeOperationError(
-						this.getNode(),
-						`URL parameter must be a string, got ${actualType}`,
-					);
-				}
-
-				// Ensure URL uses http/https protocol
-				if (!url.startsWith('http://') && !url.startsWith('https://')) {
-					throw new NodeOperationError(
-						this.getNode(),
-						`Invalid URL: ${url}. URL must start with "http" or "https".`,
-					);
-				}
+				validateUrl(this.getNode(), url, itemIndex);
 
 				// === Domain Restriction Validation ===
-				// Helper function to check if credential allows access to requested URL
-				const checkDomainRestrictions = async (
-					credentialData: IDataObject,
-					requestUrl: string,
-					credentialType?: string,
-				) => {
-					if (credentialData.allowedHttpRequestDomains === 'domains') {
-						const allowedDomains = credentialData.allowedDomains as string;
-						if (!allowedDomains || allowedDomains.trim() === '') {
-							throw new NodeOperationError(
-								this.getNode(),
-								'No allowed domains specified. Configure allowed domains or change restriction setting.',
-							);
-						}
-						if (!isDomainAllowedLocal(requestUrl, { allowedDomains })) {
-							const credentialInfo = credentialType ? ` (${credentialType})` : '';
-							throw new NodeOperationError(
-								this.getNode(),
-								`Domain not allowed: This credential${credentialInfo} is restricted from accessing ${requestUrl}. ` +
-									`Only the following domains are allowed: ${allowedDomains}`,
-							);
-						}
-					} else if (credentialData.allowedHttpRequestDomains === 'none') {
-						throw new NodeOperationError(
-							this.getNode(),
-							'This credential is configured to prevent use within an HTTP Request node',
-						);
-					}
-				};
-
-				if (httpBasicAuth) await checkDomainRestrictions(httpBasicAuth, url);
-				if (httpBearerAuth) await checkDomainRestrictions(httpBearerAuth, url);
-				if (httpDigestAuth) await checkDomainRestrictions(httpDigestAuth, url);
-				if (httpHeaderAuth) await checkDomainRestrictions(httpHeaderAuth, url);
-				if (httpQueryAuth) await checkDomainRestrictions(httpQueryAuth, url);
-				if (httpCustomAuth) await checkDomainRestrictions(httpCustomAuth, url);
-				if (oAuth1Api) await checkDomainRestrictions(oAuth1Api, url);
-				if (oAuth2Api) await checkDomainRestrictions(oAuth2Api, url);
+				for (const credentialData of [
+					httpBasicAuth,
+					httpBearerAuth,
+					httpDigestAuth,
+					httpHeaderAuth,
+					httpQueryAuth,
+					httpCustomAuth,
+					oAuth1Api,
+					oAuth2Api,
+				]) {
+					if (!credentialData) continue;
+					await checkDomainRestrictions(this.getNode(), credentialData, url);
+				}
 
 				if (nodeCredentialType) {
 					try {
 						const credentialData = await this.getCredentials(nodeCredentialType, itemIndex);
-						await checkDomainRestrictions(credentialData, url, nodeCredentialType);
+						await checkDomainRestrictions(
+							this.getNode(),
+							credentialData,
+							url,
+							nodeCredentialType,
+						);
 					} catch (error: any) {
 						if (
 							error.message?.includes('Domain not allowed') ||
@@ -479,11 +401,7 @@ export class BetterHttpRequest implements INodeType {
 				if (proxy) {
 					requestOptions.proxy = proxy;
 				}
-				if (timeout) {
-					requestOptions.timeout = timeout;
-				} else {
-					requestOptions.timeout = 300_000;
-				}
+				requestOptions.timeout = timeout || DEFAULT_TIMEOUT_MS;
 
 				if (sendQuery && queryParameterArrays) {
 					Object.assign(requestOptions, {
@@ -670,76 +588,26 @@ export class BetterHttpRequest implements INodeType {
 					authDataKeys.agentOptions = Object.keys(requestOptions.agentOptions);
 				}
 
-				// Attach appropriate authentication method to request
-				if (httpBasicAuth !== undefined) {
-					requestOptions.auth = {
-						user: httpBasicAuth.user as string,
-						pass: httpBasicAuth.password as string,
-					};
-					authDataKeys.auth = ['pass'];
-				}
-				if (httpBearerAuth !== undefined) {
-					requestOptions.headers = requestOptions.headers ?? {};
-					requestOptions.headers.Authorization = `Bearer ${String(
-						httpBearerAuth.token,
-					)}`;
-					authDataKeys.headers = ['Authorization'];
-				}
-				if (httpHeaderAuth !== undefined) {
-					requestOptions.headers![httpHeaderAuth.name as string] =
-						httpHeaderAuth.value;
-					authDataKeys.headers = [httpHeaderAuth.name as string];
-				}
-				if (httpQueryAuth !== undefined) {
-					if (!requestOptions.qs) {
-						requestOptions.qs = {};
-					}
-					requestOptions.qs[httpQueryAuth.name as string] = httpQueryAuth.value;
-					authDataKeys.qs = [httpQueryAuth.name as string];
-				}
-				if (httpDigestAuth !== undefined) {
-					requestOptions.auth = {
-						user: httpDigestAuth.user as string,
-						pass: httpDigestAuth.password as string,
-						sendImmediately: false,
-					};
-					authDataKeys.auth = ['pass'];
-				}
-				if (httpCustomAuth !== undefined) {
-					const customAuth = jsonParse<IRequestOptionsSimplified>(
-						(httpCustomAuth.json as string) || '{}',
-						{ errorMessage: 'Invalid Custom Auth JSON' },
-					);
-					if (customAuth.headers) {
-						requestOptions.headers = {
-							...requestOptions.headers,
-							...customAuth.headers,
-						};
-						authDataKeys.headers = Object.keys(customAuth.headers);
-					}
-					if (customAuth.body) {
-						requestOptions.body = {
-							...(requestOptions.body as IDataObject),
-							...customAuth.body,
-						};
-						authDataKeys.body = Object.keys(customAuth.body);
-					}
-					if (customAuth.qs) {
-						requestOptions.qs = { ...requestOptions.qs, ...customAuth.qs };
-						authDataKeys.qs = Object.keys(customAuth.qs);
-					}
-				}
+				applyAllCredentials(
+					requestOptions,
+					{
+						httpBasicAuth,
+						httpBearerAuth,
+						httpHeaderAuth,
+						httpQueryAuth,
+						httpDigestAuth,
+						httpCustomAuth,
+					},
+					authDataKeys,
+				);
 
 				if (requestOptions.headers!.accept === undefined) {
-					if (responseFormat === 'json') {
-						requestOptions.headers!.accept = 'application/json,text/*;q=0.99';
-					} else if (responseFormat === 'text') {
-						requestOptions.headers!.accept =
-							'application/json,text/html,application/xhtml+xml,application/xml,text/*;q=0.9, */*;q=0.1';
-					} else {
-						requestOptions.headers!.accept =
-							'application/json,text/html,application/xhtml+xml,application/xml,text/*;q=0.9, image/*;q=0.8, */*;q=0.7';
-					}
+					requestOptions.headers!.accept =
+						responseFormat === 'json'
+							? ACCEPT_HEADERS.JSON
+							: responseFormat === 'text'
+								? ACCEPT_HEADERS.TEXT
+								: ACCEPT_HEADERS.AUTO;
 				}
 
 				const itemRequestOptions = requestOptions;
@@ -998,23 +866,14 @@ export class BetterHttpRequest implements INodeType {
 
 		// === Queue Request Execution ===
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
-			// Skip items with build-phase errors
-			if (errorItems[itemIndex]) {
+			const executor = requestExecutors[itemIndex];
+			if (errorItems[itemIndex] || !executor) {
 				promisesResponses[itemIndex] = {
 					status: 'fulfilled',
 					value: undefined,
 				};
 				continue;
 			}
-
-			const executor = requestExecutors[itemIndex];
-		if (!executor) {
-			promisesResponses[itemIndex] = {
-				status: 'fulfilled',
-				value: undefined,
-			};
-			continue;
-		}
 
 			// If max concurrent requests reached, wait for one to complete
 			while (inFlightTasks.size >= MAX_CONCURRENT_REQUESTS) {
@@ -1027,7 +886,7 @@ export class BetterHttpRequest implements INodeType {
 				inFlightTasks.delete(task);
 			});
 			inFlightTasks.add(task);
-	}
+		}
 
 		// === Wait for all requests to complete ===
 		if (inFlightTasks.size > 0) {
@@ -1050,8 +909,7 @@ export class BetterHttpRequest implements INodeType {
 
 				if (responseData!.status !== 'fulfilled') {
 					if (responseData.reason.statusCode === 429) {
-						responseData.reason.message =
-							"Try spacing your requests out using the batching settings under 'Options'";
+						responseData.reason.message = UI_MESSAGES.RATE_LIMITED_HINT;
 					}
 					if (!this.continueOnFail()) {
 						if (
@@ -1115,12 +973,9 @@ export class BetterHttpRequest implements INodeType {
 					}
 				}
 
-				let responses: any[];
-				if (Array.isArray(responseData.value)) {
-					responses = responseData.value;
-				} else {
-					responses = [responseData.value];
-				}
+				const responses: any[] = Array.isArray(responseData.value)
+					? responseData.value
+					: [responseData.value];
 
 				let responseFormat = this.getNodeParameter(
 					'options.response.response.responseFormat',
@@ -1375,21 +1230,31 @@ export class BetterHttpRequest implements INodeType {
 		) as boolean;
 
 		if (retryOnFail && this.continueOnFail()) {
+			const getOriginalItemIndex = (
+				item: INodeExecutionData,
+				fallback: number,
+			): number =>
+				item.pairedItem &&
+				typeof item.pairedItem === 'object' &&
+				!Array.isArray(item.pairedItem)
+					? (item.pairedItem as { item: number }).item
+					: fallback;
+
 			// Retry settings: max attempts, delay between retries, and status codes to retry on
 			const maxRetries = this.getNodeParameter(
 				'options.maxRetries',
 				0,
-				3,
+				DEFAULT_MAX_RETRIES,
 			) as number;
 			const retryDelay = this.getNodeParameter(
 				'options.retryDelay',
 				0,
-				1000,
+				DEFAULT_RETRY_DELAY,
 			) as number;
 			const retryOnStatusCodesStr = this.getNodeParameter(
 				'options.retryOnStatusCodes',
 				0,
-				'429,500,502,503,504',
+				DEFAULT_RETRY_ON_STATUS_CODES,
 			) as string;
 			// Parse status codes to retry on (e.g., 429=Too Many Requests, 5xx=Server Errors)
 			const retryOnStatusCodes = new Set(
@@ -1400,12 +1265,7 @@ export class BetterHttpRequest implements INodeType {
 			);
 
 			// Connection error codes to retry (network-level failures)
-			const retryOnErrorCodes = new Set([
-				'ECONNREFUSED',
-				'ECONNRESET',
-				'ETIMEDOUT',
-				'ENOTFOUND',
-			]);
+			const retryOnErrorCodes = new Set<string>(RETRYABLE_CONNECTION_ERRORS);
 
 			// Retry loop: attempt up to maxRetries times
 			for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -1481,13 +1341,7 @@ export class BetterHttpRequest implements INodeType {
 
 				// Queue retry requests for failed items
 				for (const idx of failedIndices) {
-					const originalItemIndex =
-						returnItems[idx].pairedItem &&
-						typeof returnItems[idx].pairedItem === 'object' &&
-						!Array.isArray(returnItems[idx].pairedItem)
-							? (returnItems[idx].pairedItem as { item: number })
-									.item
-							: idx;
+					const originalItemIndex = getOriginalItemIndex(returnItems[idx], idx);
 
 					// Re-execute the original request for this item
 					if (requests[originalItemIndex]) {
@@ -1511,13 +1365,7 @@ export class BetterHttpRequest implements INodeType {
 				for (let ri = 0; ri < retryResults.length; ri++) {
 					const result = retryResults[ri];
 					const idx = retryPromises[ri].index;
-					const originalItemIndex =
-						returnItems[idx].pairedItem &&
-						typeof returnItems[idx].pairedItem === 'object' &&
-						!Array.isArray(returnItems[idx].pairedItem)
-							? (returnItems[idx].pairedItem as { item: number })
-									.item
-							: idx;
+					const originalItemIndex = getOriginalItemIndex(returnItems[idx], idx);
 
 					// If retry succeeded, process the new response
 					if (result.status === 'fulfilled' && result.value != null) {
@@ -1662,8 +1510,7 @@ export class BetterHttpRequest implements INodeType {
 			returnItems[0].json.data &&
 			Array.isArray(returnItems[0].json.data)
 		) {
-			const message =
-				"To split the contents of 'data' into separate items for easier processing, add a 'Split Out' node after this one";
+			const message = UI_MESSAGES.SPLIT_OUT_HINT;
 			if (this.addExecutionHints) {
 				this.addExecutionHints({
 					message,
