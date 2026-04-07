@@ -94,6 +94,8 @@ export class BetterHttpRequest implements INodeType {
 		// Node version determines API behavior (e.g., redirect handling)
 		const nodeVersion = this.getNode().typeVersion;
 
+		this.logger.debug('Starting Better HTTP Request node execution', { numberOfItems: items.length });
+
 		// Properties included in full response mode
 		const fullResponseProperties = FULL_RESPONSE_PROPERTIES;
 
@@ -756,6 +758,7 @@ export class BetterHttpRequest implements INodeType {
 			} catch (error) {
 				if (!this.continueOnFail()) throw error;
 				errorItems[itemIndex] = (error as Error).message;
+				this.logger.warn(`Failed to process item ${itemIndex}`, { error: (error as Error).message });
 				continue;
 			}
 		}
@@ -787,6 +790,7 @@ export class BetterHttpRequest implements INodeType {
 			itemIndex: number,
 			executor: () => Promise<any>,
 		): Promise<void> => {
+			this.logger.debug(`Executing request for item ${itemIndex}`);
 			try {
 				const value = await executor();
 				promisesResponses[itemIndex] = {
@@ -798,6 +802,7 @@ export class BetterHttpRequest implements INodeType {
 					status: 'rejected',
 					reason,
 				};
+				this.logger.debug(`Request failed for item ${itemIndex}`, { error: reason });
 			} finally {
 				if (errorItems[itemIndex]) return;
 				try {
@@ -1265,6 +1270,8 @@ export class BetterHttpRequest implements INodeType {
 				// If no failures, exit retry loop
 				if (failedIndices.length === 0) break;
 
+				this.logger.info(`Retrying ${failedIndices.length} failed items, attempt ${attempt + 1} of ${maxRetries}`);
+
 				// === Calculate effective retry delay ===
 				// Check for Retry-After header in 429 responses
 				let effectiveDelay = retryDelay;
@@ -1467,6 +1474,8 @@ export class BetterHttpRequest implements INodeType {
 		// === Final Cleanup ===
 		// Replace null values with empty strings to avoid serialization issues
 		returnItems = returnItems.map(replaceNullValues);
+
+		this.logger.debug('Better HTTP Request node execution finished', { returnItemsLength: returnItems.length });
 
 		// === Execution Hint for UI ===
 		// Provide helpful message if response contains array data that could be split
