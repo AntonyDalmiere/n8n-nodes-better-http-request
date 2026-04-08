@@ -774,7 +774,12 @@ export class BetterHttpRequest implements INodeType {
 		const totalCount = items.length;
 
 		const reportProgress = () => {
-			const percentage = Math.round((completedCount / totalCount) * 100);
+			const percentage =
+				totalCount === 0
+					? 100
+					: completedCount >= totalCount
+						? 100
+						: Math.floor((completedCount / totalCount) * 100);
 			this.sendMessageToUI({
 				type: 'progress',
 				message: `${percentage}% complete (${completedCount}/${totalCount} items)`,

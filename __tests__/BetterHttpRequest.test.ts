@@ -1309,5 +1309,40 @@ describe('BetterHttpRequest Node', () => {
 			expect(lastProgress.completed).toBe(itemCount);
 			expect(lastProgress.total).toBe(itemCount);
 		}, 10000);
+
+		it('should not report 100% before the final item in large batches', async () => {
+			const progressCalls: any[] = [];
+			const sendMessageToUI = jest.fn((msg: any) => {
+				if (msg.type === 'progress') {
+					progressCalls.push(msg);
+				}
+			});
+
+			const itemCount = 200;
+			const mockFn = createMockExecuteFunctions({
+				items: makeItems(itemCount),
+				continueOnFail: true,
+				requestFn: async () => ({
+					body: { success: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				}),
+			});
+
+			(mockFn as any).sendMessageToUI = sendMessageToUI;
+
+			await node.execute.call(mockFn);
+
+			const callsAtHundred = progressCalls.filter((call) => call.percentage === 100);
+			expect(callsAtHundred.length).toBeGreaterThan(0);
+			for (const call of callsAtHundred) {
+				expect(call.completed).toBe(itemCount);
+				expect(call.total).toBe(itemCount);
+			}
+
+			const preFinalCalls = progressCalls.filter((call) => call.completed < itemCount);
+			expect(preFinalCalls.every((call) => call.percentage < 100)).toBe(true);
+		}, 15000);
 	});
 });
