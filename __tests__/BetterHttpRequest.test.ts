@@ -1025,7 +1025,7 @@ describe('BetterHttpRequest Node', () => {
 					error.code = 'ETIMEDOUT';
 					throw error;
 				}
-				return { 
+				return {
 					body: { success: true, count: callCount },
 					headers: { 'content-type': 'application/json' },
 					statusCode: 200,
@@ -1046,10 +1046,10 @@ describe('BetterHttpRequest Node', () => {
 
 			const result = await node.execute.call(mockFn);
 			expect(result[0]).toHaveLength(1000); // Because continueOnFail is true
-			
+
 			const fails = result[0].filter(item => item.json.error);
 			const successes = result[0].filter(item => item.json.success === true);
-			
+
 			expect(fails.length).toBeGreaterThan(0);
 			expect(successes.length).toBeGreaterThan(800);
 		});
@@ -1100,5 +1100,214 @@ describe('BetterHttpRequest Node', () => {
 			expect(callIndex).toBe(3); // Attempted three times total
 			sleepSpy.mockRestore();
 		});
+	});
+
+	describe('Progress Tracking Regression Tests', () => {
+		/**
+		 * Regression test: Progress must reach 100% even when some items fail during build phase.
+		 * Bug: Items that fail URL validation caused early returns in finally block,
+		 * preventing completedCount from incrementing, leaving the node "in progress" forever.
+		 */
+		it('should report 100% progress when some items fail URL validation', async () => {
+			const progressCalls: any[] = [];
+			const sendMessageToUI = jest.fn((msg: any) => {
+				if (msg.type === 'progress') {
+					progressCalls.push(msg);
+				}
+			});
+
+			const mockFn = createMockExecuteFunctions({
+				items: [
+					{ json: { index: 0 }, pairedItem: { item: 0 } }, // Valid URL
+					{ json: { index: 1 }, pairedItem: { item: 1 } }, // Invalid URL
+					{ json: { index: 2 }, pairedItem: { item: 2 } }, // Valid URL
+				],
+				continueOnFail: true,
+				params: {
+					// Per-item URLs - item 1 has invalid URL
+					'url[0]': 'https://api.example.com/data',
+					'url[1]': 'not-a-valid-url',
+					'url[2]': 'https://api.example.com/data2',
+				},
+				requestFn: async () => ({
+					body: { success: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				}),
+			});
+
+			// Override sendMessageToUI to capture progress
+			(mockFn as any).sendMessageToUI = sendMessageToUI;
+
+			const result = await node.execute.call(mockFn);
+
+			// Should complete all 3 items
+			expect(result[0]).toHaveLength(3);
+			// Item 0 and 2 should succeed
+			expect(result[0][0].json).toHaveProperty('success', true);
+			expect(result[0][2].json).toHaveProperty('success', true);
+			// Item 1 should have an error
+			expect(result[0][1].json).toHaveProperty('error');
+
+			// Progress must reach 100% - this is the critical assertion
+			const lastProgress = progressCalls[progressCalls.length - 1];
+			expect(lastProgress).toBeDefined();
+			expect(lastProgress.percentage).toBe(100);
+			expect(lastProgress.completed).toBe(3);
+			expect(lastProgress.total).toBe(3);
+		});
+
+		it('should report 100% progress when all items fail during build phase', async () => {
+			const progressCalls: any[] = [];
+			const sendMessageToUI = jest.fn((msg: any) => {
+				if (msg.type === 'progress') {
+					progressCalls.push(msg);
+				}
+			});
+
+			const mockFn = createMockExecuteFunctions({
+				items: [
+					{ json: { index: 0 }, pairedItem: { item: 0 } },
+					{ json: { index: 1 }, pairedItem: { item: 1 } },
+					{ json: { index: 2 }, pairedItem: { item: 2 } },
+				],
+				continueOnFail: true,
+				params: {
+					'url[0]': 'invalid-url-1',
+					'url[1]': 'invalid-url-2',
+					'url[2]': 'invalid-url-3',
+				},
+				requestFn: async () => ({
+					body: { success: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				}),
+			});
+
+			(mockFn as any).sendMessageToUI = sendMessageToUI;
+
+			const result = await node.execute.call(mockFn);
+
+			// All items should have errors
+			expect(result[0]).toHaveLength(3);
+			expect(result[0][0].json).toHaveProperty('error');
+			expect(result[0][1].json).toHaveProperty('error');
+			expect(result[0][2].json).toHaveProperty('error');
+
+			// Progress MUST reach 100% - critical regression check
+			const lastProgress = progressCalls[progressCalls.length - 1];
+			expect(lastProgress).toBeDefined();
+			expect(lastProgress.percentage).toBe(100);
+			expect(lastProgress.completed).toBe(3);
+			expect(lastProgress.total).toBe(3);
+		});
+
+		it('should report 100% progress with mixed build failures and request failures', async () => {
+			const progressCalls: any[] = [];
+			const sendMessageToUI = jest.fn((msg: any) => {
+				if (msg.type === 'progress') {
+					progressCalls.push(msg);
+				}
+			});
+
+			const mockFn = createMockExecuteFunctions({
+				items: makeItems(5),
+				continueOnFail: true,
+				params: {
+					// Items 1 and 3 have invalid URLs (build phase failure)
+					'url[0]': 'https://api.example.com/data?item=0',
+					'url[1]': 'not-valid',
+					'url[2]': 'https://api.example.com/data?item=2',
+					'url[3]': 'also-invalid',
+					'url[4]': 'https://api.example.com/data?item=4',
+				},
+				requestFn: async (opts) => {
+					const requestUri = String(opts.uri ?? '');
+					// Make failure deterministic by item identity, not request execution order
+					if (requestUri.includes('item=2')) {
+						const err: any = new Error('Server Error');
+						err.statusCode = 500;
+						throw err;
+					}
+					return {
+						body: { success: true },
+						headers: { 'content-type': 'application/json' },
+						statusCode: 200,
+						statusMessage: 'OK',
+					};
+				},
+			});
+
+			(mockFn as any).sendMessageToUI = sendMessageToUI;
+
+			const result = await node.execute.call(mockFn);
+
+			expect(result[0]).toHaveLength(5);
+			// Items 0 and 4 should succeed
+			expect(result[0][0].json).toHaveProperty('success', true);
+			expect(result[0][4].json).toHaveProperty('success', true);
+			// Items 1 and 3 should have build errors
+			expect(result[0][1].json).toHaveProperty('error');
+			expect(result[0][3].json).toHaveProperty('error');
+			// Item 2 should have request error
+			expect(result[0][2].json).toHaveProperty('error');
+
+			// Progress MUST reach 100% with all 5 items counted
+			const lastProgress = progressCalls[progressCalls.length - 1];
+			expect(lastProgress).toBeDefined();
+			expect(lastProgress.percentage).toBe(100);
+			expect(lastProgress.completed).toBe(5);
+			expect(lastProgress.total).toBe(5);
+		});
+
+		it('should report 100% progress for large batch with scattered build failures', async () => {
+			const progressCalls: any[] = [];
+			const sendMessageToUI = jest.fn((msg: any) => {
+				if (msg.type === 'progress') {
+					progressCalls.push(msg);
+				}
+			});
+
+			const itemCount = 100;
+			const items = makeItems(itemCount);
+
+			// Create params with scattered invalid URLs
+			const params: Record<string, unknown> = {};
+			for (let i = 0; i < itemCount; i++) {
+				// Every 7th item has invalid URL
+				if (i % 7 === 0) {
+					params[`url[${i}]`] = 'invalid-url';
+				} else {
+					params[`url[${i}]`] = 'https://api.example.com/data';
+				}
+			}
+
+			const mockFn = createMockExecuteFunctions({
+				items,
+				continueOnFail: true,
+				params,
+				requestFn: async () => ({
+					body: { success: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				}),
+			});
+
+			(mockFn as any).sendMessageToUI = sendMessageToUI;
+
+			const result = await node.execute.call(mockFn);
+
+			expect(result[0]).toHaveLength(itemCount);
+
+			// Progress MUST reach 100%
+			const lastProgress = progressCalls[progressCalls.length - 1];
+			expect(lastProgress).toBeDefined();
+			expect(lastProgress.percentage).toBe(100);
+			expect(lastProgress.completed).toBe(itemCount);
+			expect(lastProgress.total).toBe(itemCount);
+		}, 10000);
 	});
 });

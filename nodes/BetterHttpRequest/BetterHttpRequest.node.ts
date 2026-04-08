@@ -804,31 +804,33 @@ export class BetterHttpRequest implements INodeType {
 				};
 				this.logger.debug(`Request failed for item ${itemIndex}`, { error: reason });
 			} finally {
-				if (errorItems[itemIndex]) return;
-				try {
-					const requestData = requests[itemIndex];
-					if (!requestData) return;
+				// Sanitize and log request options (if available)
+				if (!errorItems[itemIndex]) {
+					try {
+						const requestData = requests[itemIndex];
+						if (requestData) {
+							const { options, authKeys, credentialType } = requestData;
+							let secrets: string[] = [];
+							if (credentialType) {
+								const properties = this.getCredentialsProperties(credentialType);
+								const credentials = await this.getCredentials(
+									credentialType,
+									itemIndex,
+								);
+								secrets = getSecrets(properties, credentials);
+							}
+							const sanitizedRequestOptions = sanitizeUiMessage(
+								options,
+								authKeys,
+								secrets,
+							);
+							sanitizedRequests[itemIndex] = sanitizedRequestOptions;
+							this.sendMessageToUI(sanitizedRequestOptions);
+						}
+					} catch {}
+				}
 
-					const { options, authKeys, credentialType } = requestData;
-					let secrets: string[] = [];
-					if (credentialType) {
-						const properties = this.getCredentialsProperties(credentialType);
-						const credentials = await this.getCredentials(
-							credentialType,
-							itemIndex,
-						);
-						secrets = getSecrets(properties, credentials);
-					}
-					const sanitizedRequestOptions = sanitizeUiMessage(
-						options,
-						authKeys,
-						secrets,
-					);
-					sanitizedRequests[itemIndex] = sanitizedRequestOptions;
-					this.sendMessageToUI(sanitizedRequestOptions);
-				} catch {}
-
-				// Report progress
+				// Report progress (must always execute)
 				completedCount++;
 				reportProgress();
 			}
@@ -842,6 +844,9 @@ export class BetterHttpRequest implements INodeType {
 					status: 'fulfilled',
 					value: undefined,
 				};
+				// Track progress for items that failed during build phase
+				completedCount++;
+				reportProgress();
 				continue;
 			}
 
