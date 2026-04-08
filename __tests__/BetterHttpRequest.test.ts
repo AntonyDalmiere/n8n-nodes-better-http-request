@@ -345,6 +345,66 @@ describe('BetterHttpRequest Node', () => {
 		expect(result[0][1].json).toHaveProperty('success', true);
 	});
 
+	// 5b. Retry concurrency should stay bounded under large failure sets
+	test('retry execution is bounded by concurrency cap on large batches', async () => {
+		let inFlight = 0;
+		let maxInFlight = 0;
+		const attemptsByUri = new Map<string, number>();
+
+		const itemCount = 60;
+		const params: Record<string, unknown> = {
+			'options': {
+				retryOnFail: true,
+				maxRetries: 1,
+				retryDelay: 0,
+				retryOnStatusCodes: '500',
+			},
+			'options.retryOnFail': true,
+			'options.maxRetries': 1,
+			'options.retryDelay': 0,
+			'options.retryOnStatusCodes': '500',
+		};
+
+		for (let i = 0; i < itemCount; i++) {
+			params[`url[${i}]`] = `https://api.example.com/retry/${i}`;
+		}
+
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(itemCount),
+			continueOnFail: true,
+			params,
+			requestFn: async (opts) => {
+				inFlight++;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await new Promise((resolve) => setTimeout(resolve, 3));
+
+				const uri = String(opts.uri ?? '');
+				const attempts = (attemptsByUri.get(uri) ?? 0) + 1;
+				attemptsByUri.set(uri, attempts);
+
+				inFlight--;
+				if (attempts === 1) {
+					const err: any = new Error('Internal Server Error');
+					err.statusCode = 500;
+					throw err;
+				}
+
+				return {
+					body: { success: true },
+					headers: { 'content-type': 'application/json' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+
+		expect(result[0]).toHaveLength(itemCount);
+		expect(result[0].every((item) => !item.json.error)).toBe(true);
+		expect(maxInFlight).toBeLessThanOrEqual(10);
+	}, 30000);
+
 	// 6. Retry with 429 + Retry-After header
 	test('retry respects 429 Retry-After header', async () => {
 		let callCount = 0;
@@ -606,6 +666,47 @@ describe('BetterHttpRequest Node', () => {
 		const result = await node.execute.call(mockFn);
 		expect(result[0]).toHaveLength(1);
 		expect(result[0][0].json).toHaveProperty('data', 'Hello, World!');
+	});
+
+	// 12b. Autodetect should not stream responses
+	test('autodetect response format uses buffered body (no stream) and parses JSON', async () => {
+		let capturedOptions: IRequestOptions | undefined;
+
+		const mockFn = createMockExecuteFunctions({
+			items: makeItems(1),
+			params: {
+				'options': {
+					response: {
+						response: {
+							fullResponse: false,
+							responseFormat: 'autodetect',
+							neverError: false,
+							outputPropertyName: 'data',
+						},
+					},
+				},
+				'options.response.response.responseFormat': 'autodetect',
+				'options.response.response.fullResponse': false,
+				'options.response.response.neverError': false,
+				'options.response.response.outputPropertyName': 'data',
+			},
+			requestFn: async (opts) => {
+				capturedOptions = opts;
+				return {
+					body: Buffer.from('{"ok":true}'),
+					headers: { 'content-type': 'application/json; charset=utf-8' },
+					statusCode: 200,
+					statusMessage: 'OK',
+				};
+			},
+		});
+
+		const result = await node.execute.call(mockFn);
+
+		expect(capturedOptions?.encoding).toBeNull();
+		expect(capturedOptions?.json).toBe(false);
+		expect(capturedOptions?.useStream).toBe(false);
+		expect(result[0][0].json).toEqual({ ok: true });
 	});
 
 	// 13. Never error mode - non-2xx responses don't throw

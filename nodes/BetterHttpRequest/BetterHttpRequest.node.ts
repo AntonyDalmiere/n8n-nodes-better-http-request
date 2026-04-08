@@ -524,11 +524,16 @@ export class BetterHttpRequest implements INodeType {
 				}
 
 				// === Configure Response Encoding ===
-				// For file/binary responses, use streaming; for JSON, parse automatically
-				if (autoDetectResponseFormat || responseFormat === 'file') {
+				// Keep streaming only for explicit file/raw responses.
+				// For autodetect, use buffered bodies to avoid unresolved streams after progress reaches 100%.
+				if (responseFormat === 'file') {
 					requestOptions.encoding = null;
 					requestOptions.json = false;
 					requestOptions.useStream = true;
+				} else if (autoDetectResponseFormat) {
+					requestOptions.encoding = null;
+					requestOptions.json = false;
+					requestOptions.useStream = false;
 				} else if (bodyContentType === 'raw') {
 					requestOptions.json = false;
 					requestOptions.useStream = true;
@@ -1315,38 +1320,61 @@ export class BetterHttpRequest implements INodeType {
 					await sleep(effectiveDelay);
 				}
 
-				// === Re-execute failed requests ===
-				const retryPromises: Array<{
+				// === Re-execute failed requests with bounded concurrency ===
+				const retryResults: Array<{
 					index: number;
-					promise: Promise<any>;
+					result: PromiseSettledResult<any>;
 				}> = [];
 
-				// Queue retry requests for failed items
-				for (const idx of failedIndices) {
-					const originalItemIndex = getOriginalItemIndex(returnItems[idx], idx);
+				for (
+					let batchStart = 0;
+					batchStart < failedIndices.length;
+					batchStart += MAX_CONCURRENT_REQUESTS
+				) {
+					const batchIndices = failedIndices.slice(
+						batchStart,
+						batchStart + MAX_CONCURRENT_REQUESTS,
+					);
 
-					// Re-execute the original request for this item
-					if (requests[originalItemIndex]) {
-						const { options } = requests[originalItemIndex];
-						const retryRequest = this.helpers
-							.request(options)
-							.catch(() => {});
-						retryPromises.push({
-							index: idx,
-							promise: retryRequest,
+					const retryBatch = batchIndices
+						.map((idx) => {
+							const originalItemIndex = getOriginalItemIndex(
+								returnItems[idx],
+								idx,
+							);
+							const requestData = requests[originalItemIndex];
+							if (!requestData) {
+								return undefined;
+							}
+
+							return {
+								index: idx,
+								promise: this.helpers.request(requestData.options),
+							};
+						})
+						.filter(
+							(
+								entry,
+							): entry is { index: number; promise: Promise<any> } =>
+								entry !== undefined,
+						);
+
+					const settledBatch = await Promise.allSettled(
+						retryBatch.map((entry) => entry.promise),
+					);
+
+					for (let i = 0; i < settledBatch.length; i++) {
+						retryResults.push({
+							index: retryBatch[i].index,
+							result: settledBatch[i],
 						});
 					}
 				}
 
-				// Wait for all retry requests to settle
-				const retryResults = await Promise.allSettled(
-					retryPromises.map((r) => r.promise),
-				);
-
 				// === Process retry results and update return items ===
-				for (let ri = 0; ri < retryResults.length; ri++) {
-					const result = retryResults[ri];
-					const idx = retryPromises[ri].index;
+				for (const retryResult of retryResults) {
+					const result = retryResult.result;
+					const idx = retryResult.index;
 					const originalItemIndex = getOriginalItemIndex(returnItems[idx], idx);
 
 					// If retry succeeded, process the new response
